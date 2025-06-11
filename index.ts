@@ -281,7 +281,8 @@ app.options('/mcp', ({ set }) => {
   set.headers['Access-Control-Allow-Origin'] = '*';
   set.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS';
   set.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, mcp-session-id';
-  return new Response('', { status: 200 });
+  set.status = 200;
+  return '';
 });
 // Handle MCP requests with session management
 app.post('/mcp', async ({ body, headers, set }) => {
@@ -317,14 +318,15 @@ app.post('/mcp', async ({ body, headers, set }) => {
       // Invalid request
       console.log('Invalid request - no session ID and not initialize');
       set.status = 400;
-      return {
+      set.headers['Content-Type'] = 'application/json';
+      return JSON.stringify({
         jsonrpc: '2.0',
         error: {
           code: -32000,
           message: 'Bad Request: No valid session ID provided',
         },
         id: null,
-      };
+      });
     }
     // Create a proper request/response object that the MCP transport expects
     const req = {
@@ -358,14 +360,16 @@ app.post('/mcp', async ({ body, headers, set }) => {
       
       end(data?: any) {
         responseData = data;
-        set.status = responseStatus;
-        Object.entries(responseHeaders).forEach(([key, value]) => {
-          set.headers[key] = value;
-        });
       }
     };
     // Handle the request
     await transport.handleRequest(req as any, res as any, body);
+    
+    // Set response status and headers
+    set.status = responseStatus;
+    Object.entries(responseHeaders).forEach(([key, value]) => {
+      set.headers[key] = value;
+    });
     
     // Return the response data
     if (responseData) {
@@ -380,14 +384,15 @@ app.post('/mcp', async ({ body, headers, set }) => {
   } catch (error) {
     console.error('Error in POST /mcp:', error);
     set.status = 500;
-    return {
+    set.headers['Content-Type'] = 'application/json';
+    return JSON.stringify({
       jsonrpc: '2.0',
       error: {
         code: -32603,
         message: 'Internal server error',
       },
       id: null,
-    };
+    });
   }
 });
 // Handle GET requests for server-to-client notifications
@@ -432,13 +437,15 @@ app.get('/mcp', async ({ headers, set }) => {
     
     end(data?: any) {
       responseData = data;
-      set.status = responseStatus;
-      Object.entries(responseHeaders).forEach(([key, value]) => {
-        set.headers[key] = value;
-      });
     }
   };
   await transport.handleRequest(req as any, res as any);
+  
+  // Set response status and headers
+  set.status = responseStatus;
+  Object.entries(responseHeaders).forEach(([key, value]) => {
+    set.headers[key] = value;
+  });
   
   if (responseData) {
     try {
@@ -495,13 +502,15 @@ app.delete('/mcp', async ({ headers, set }) => {
     
     end(data?: any) {
       responseData = data;
-      set.status = responseStatus;
-      Object.entries(responseHeaders).forEach(([key, value]) => {
-        set.headers[key] = value;
-      });
     }
   };
   await transport.handleRequest(req as any, res as any);
+  
+  // Set response status and headers
+  set.status = responseStatus;
+  Object.entries(responseHeaders).forEach(([key, value]) => {
+    set.headers[key] = value;
+  });
   
   if (responseData) {
     try {
@@ -523,9 +532,9 @@ app.get('/health', () => ({
 // Start the server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 HTTP MCP Server running on port ${PORT}`);
+  console.log(`🚀 HTTP MCP Server running on port 3000`);
   console.log(`📚 API Documentation available at: docs://http-client`);
-  console.log(`🔧 Health check: http://localhost:${PORT}/health`);
-  console.log(`🌐 MCP endpoint: http://localhost:${PORT}/mcp`);
+  console.log(`🔧 Health check: http://localhost:3000/health`);
+  console.log(`🌐 MCP endpoint: http://localhost:3000/mcp`);
 });
 export default app;
