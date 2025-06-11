@@ -270,78 +270,148 @@ function parseCurlCommand(curlCommand: string) {
   }
   return { url, method, headers, body };
 }
+// Add proper CORS and content-type handling
+app.use((context) => {
+  // Set CORS headers
+  context.set.headers['Access-Control-Allow-Origin'] = '*';
+  context.set.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS';
+  context.set.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, mcp-session-id';
+});
+// Handle OPTIONS requests for CORS
+app.options('/mcp', ({ set }) => {
+  set.headers['Access-Control-Allow-Origin'] = '*';
+  set.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS';
+  set.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, mcp-session-id';
+  return '';
+});
 // Handle MCP requests with session management
-app.post('/mcp', async ({ body, headers, set }) => {
+app.post('/mcp', async (context) => {
+  const { body, headers, set } = context;
+  
+  console.log('Received POST message for sessionId', headers['mcp-session-id']);
+  
   const sessionId = headers['mcp-session-id'] as string | undefined;
   let transport: StreamableHTTPServerTransport;
-  if (sessionId && sessions[sessionId]) {
-    // Reuse existing transport
-    transport = sessions[sessionId].transport;
-  } else if (!sessionId && isInitializeRequest(body)) {
-    // New initialization request
-    transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => randomUUID(),
-      onsessioninitialized: (sessionId) => {
-        sessions[sessionId] = { transport };
-      }
-    });
-    // Clean up transport when closed
-    transport.onclose = () => {
-      if (transport.sessionId) {
-        delete sessions[transport.sessionId];
+  try {
+    if (sessionId && sessions[sessionId]) {
+      // Reuse existing transport
+      transport = sessions[sessionId].transport;
+      console.log('Reusing existing session:', sessionId);
+    } else if (!sessionId && isInitializeRequest(body)) {
+      // New initialization request
+      console.log('Creating new session...');
+      transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (sessionId) => {
+          console.log('Session initialized:', sessionId);
+          sessions[sessionId] = { transport };
+        }
+      });
+      // Clean up transport when closed
+      transport.onclose = () => {
+        console.log('Session closed:', transport.sessionId);
+        if (transport.sessionId) {
+          delete sessions[transport.sessionId];
+        }
+      };
+      const server = createMcpServer();
+      await server.connect(transport);
+    } else {
+      // Invalid request
+      console.log('Invalid request - no session ID and not initialize');
+      set.status = 400;
+      return {
+        jsonrpc: '2.0',
+        error: {
+          code: -32000,
+          message: 'Bad Request: No valid session ID provided',
+        },
+        id: null,
+      };
+    }
+    // Create a proper request/response object that the MCP transport expects
+    const req = {
+      method: 'POST',
+      headers: headers as Record<string, string>,
+      body: JSON.stringify(body),
+      url: '/mcp'
+    };
+    const res = {
+      headersSent: false,
+      statusCode: 200,
+      _headers: {} as Record<string, string>,
+      
+      setHeader(name: string, value: string) {
+        this._headers[name] = value;
+      },
+      
+      writeHead(statusCode: number, headers?: Record<string, string>) {
+        this.statusCode = statusCode;
+        if (headers) {
+          Object.assign(this._headers, headers);
+        }
+        return this;
+      },
+      
+      write(chunk: any) {
+        return true;
+      },
+      
+      end(data?: any) {
+        // Set response headers and status
+        set.status = this.statusCode;
+        Object.entries(this._headers).forEach(([key, value]) => {
+          set.headers[key] = value;
+        });
+        
+        if (data) {
+          try {
+            return JSON.parse(data);
+          } catch {
+            return data;
+          }
+        }
+        return undefined;
       }
     };
-    const server = createMcpServer();
-    await server.connect(transport);
-  } else {
-    // Invalid request
-    set.status = 400;
+    // Handle the request
+    return new Promise((resolve, reject) => {
+      transport.handleRequest(req as any, res as any, body)
+        .then(() => {
+          // The response should be handled by the res.end() method
+          resolve(undefined);
+        })
+        .catch((error) => {
+          console.error('Error handling MCP request:', error);
+          reject(error);
+        });
+      // Set up the end method to resolve the promise
+      const originalEnd = res.end.bind(res);
+      res.end = (data?: any) => {
+        const result = originalEnd(data);
+        resolve(result);
+        return res as any;
+      };
+    });
+  } catch (error) {
+    console.error('Error in POST /mcp:', error);
+    set.status = 500;
     return {
       jsonrpc: '2.0',
       error: {
-        code: -32000,
-        message: 'Bad Request: No valid session ID provided',
+        code: -32603,
+        message: 'Internal server error',
       },
       id: null,
     };
   }
-  // Handle the request using Elysia's response handling
-  return new Promise((resolve, reject) => {
-    const mockReq = {
-      headers: headers as Record<string, string>,
-      body: JSON.stringify(body)
-    };
-    const mockRes = {
-      headersSent: false,
-      headers: {} as Record<string, string>,
-      statusCode: 200,
-      setHeader: function(name: string, value: string) {
-        this.headers[name] = value;
-      },
-      writeHead: function(statusCode: number, headers?: Record<string, string>) {
-        this.statusCode = statusCode;
-        if (headers) {
-          Object.assign(this.headers, headers);
-        }
-        return this;
-      },
-      write: function(chunk: any) {
-        // Handle streaming data if needed
-        return true;
-      },
-      end: function(data?: any) {
-        set.status = this.statusCode;
-        Object.entries(this.headers).forEach(([key, value]) => {
-          set.headers[key] = value;
-        });
-        resolve(data ? JSON.parse(data) : undefined);
-      }
-    };
-    transport.handleRequest(mockReq as any, mockRes as any, body).catch(reject);
-  });
 });
 // Handle GET requests for server-to-client notifications
-app.get('/mcp', ({ headers, set }) => {
+app.get('/mcp', async (context) => {
+  const { headers, set } = context;
+  
+  console.log('Received GET request for sessionId', headers['mcp-session-id']);
+  
   const sessionId = headers['mcp-session-id'] as string | undefined;
   if (!sessionId || !sessions[sessionId]) {
     set.status = 400;
@@ -350,36 +420,58 @@ app.get('/mcp', ({ headers, set }) => {
   
   const transport = sessions[sessionId].transport;
   
-  return new Promise((resolve, reject) => {
-    const mockReq = { headers: headers as Record<string, string> };
-    const mockRes = {
-      headersSent: false,
-      headers: {} as Record<string, string>,
-      statusCode: 200,
-      setHeader: function(name: string, value: string) {
-        this.headers[name] = value;
-      },
-      writeHead: function(statusCode: number, headers?: Record<string, string>) {
-        this.statusCode = statusCode;
-        if (headers) Object.assign(this.headers, headers);
-        return this;
-      },
-      write: function(chunk: any) {
-        return true;
-      },
-      end: function(data?: any) {
-        set.status = this.statusCode;
-        Object.entries(this.headers).forEach(([key, value]) => {
-          set.headers[key] = value;
-        });
-        resolve(data || undefined);
+  const req = {
+    method: 'GET',
+    headers: headers as Record<string, string>,
+    url: '/mcp'
+  };
+  const res = {
+    headersSent: false,
+    statusCode: 200,
+    _headers: {} as Record<string, string>,
+    
+    setHeader(name: string, value: string) {
+      this._headers[name] = value;
+    },
+    
+    writeHead(statusCode: number, headers?: Record<string, string>) {
+      this.statusCode = statusCode;
+      if (headers) {
+        Object.assign(this._headers, headers);
       }
+      return this;
+    },
+    
+    write(chunk: any) {
+      return true;
+    },
+    
+    end(data?: any) {
+      set.status = this.statusCode;
+      Object.entries(this._headers).forEach(([key, value]) => {
+        set.headers[key] = value;
+      });
+      return data;
+    }
+  };
+  return new Promise((resolve, reject) => {
+    transport.handleRequest(req as any, res as any)
+      .then(() => resolve(undefined))
+      .catch(reject);
+    const originalEnd = res.end.bind(res);
+    res.end = (data?: any) => {
+      const result = originalEnd(data);
+      resolve(result);
+      return res as any;
     };
-    transport.handleRequest(mockReq as any, mockRes as any).catch(reject);
   });
 });
 // Handle DELETE requests for session termination
-app.delete('/mcp', ({ headers, set }) => {
+app.delete('/mcp', async (context) => {
+  const { headers, set } = context;
+  
+  console.log('Received DELETE request for sessionId', headers['mcp-session-id']);
+  
   const sessionId = headers['mcp-session-id'] as string | undefined;
   if (!sessionId || !sessions[sessionId]) {
     set.status = 400;
@@ -388,39 +480,58 @@ app.delete('/mcp', ({ headers, set }) => {
   
   const transport = sessions[sessionId].transport;
   
-  return new Promise((resolve, reject) => {
-    const mockReq = { headers: headers as Record<string, string> };
-    const mockRes = {
-      headersSent: false,
-      headers: {} as Record<string, string>,
-      statusCode: 200,
-      setHeader: function(name: string, value: string) {
-        this.headers[name] = value;
-      },
-      writeHead: function(statusCode: number, headers?: Record<string, string>) {
-        this.statusCode = statusCode;
-        if (headers) Object.assign(this.headers, headers);
-        return this;
-      },
-      write: function(chunk: any) {
-        return true;
-      },
-      end: function(data?: any) {
-        set.status = this.statusCode;
-        Object.entries(this.headers).forEach(([key, value]) => {
-          set.headers[key] = value;
-        });
-        resolve(data || undefined);
+  const req = {
+    method: 'DELETE',
+    headers: headers as Record<string, string>,
+    url: '/mcp'
+  };
+  const res = {
+    headersSent: false,
+    statusCode: 200,
+    _headers: {} as Record<string, string>,
+    
+    setHeader(name: string, value: string) {
+      this._headers[name] = value;
+    },
+    
+    writeHead(statusCode: number, headers?: Record<string, string>) {
+      this.statusCode = statusCode;
+      if (headers) {
+        Object.assign(this._headers, headers);
       }
+      return this;
+    },
+    
+    write(chunk: any) {
+      return true;
+    },
+    
+    end(data?: any) {
+      set.status = this.statusCode;
+      Object.entries(this._headers).forEach(([key, value]) => {
+        set.headers[key] = value;
+      });
+      return data;
+    }
+  };
+  return new Promise((resolve, reject) => {
+    transport.handleRequest(req as any, res as any)
+      .then(() => resolve(undefined))
+      .catch(reject);
+    const originalEnd = res.end.bind(res);
+    res.end = (data?: any) => {
+      const result = originalEnd(data);
+      resolve(result);
+      return res as any;
     };
-    transport.handleRequest(mockReq as any, mockRes as any).catch(reject);
   });
 });
 // Health check endpoint
 app.get('/health', () => ({
   status: 'healthy',
   timestamp: new Date().toISOString(),
-  sessions: Object.keys(sessions).length
+  sessions: Object.keys(sessions).length,
+  activeSessions: Object.keys(sessions)
 }));
 // Start the server
 const PORT = process.env.PORT || 3000;
