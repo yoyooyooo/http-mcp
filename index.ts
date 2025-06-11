@@ -3,6 +3,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { randomUUID } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import { z } from 'zod';
 // 会话管理
 const sessions: Record<string, { transport: StreamableHTTPServerTransport }> = {};
@@ -60,6 +61,46 @@ async function makeHttpRequest(config: {
     return { error: true, message: error.message };
   }
 }
+// 解析 CURL 命令
+function parseCurlCommand(curlCommand: string) {
+  const parts = curlCommand.split(/\s+/);
+  let url = '';
+  let method = 'GET';
+  const headers: Record<string, string> = {};
+  let body: any = undefined;
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i];
+    
+    if (part === 'curl') continue;
+    
+    if (part === '-X' || part === '--request') {
+      method = parts[++i]?.toUpperCase() || 'GET';
+    } else if (part === '-H' || part === '--header') {
+      const header = parts[++i]?.replace(/['"]/g, '');
+      if (header) {
+        const [key, ...valueParts] = header.split(':');
+        if (key && valueParts.length > 0) {
+          headers[key.trim()] = valueParts.join(':').trim();
+        }
+      }
+    } else if (part === '-d' || part === '--data') {
+      const data = parts[++i]?.replace(/^['"]|['"]$/g, '');
+      if (data) {
+        try {
+          body = JSON.parse(data);
+        } catch {
+          body = data;
+        }
+      }
+    } else if (!part.startsWith('-') && !url) {
+      url = part.replace(/['"]/g, '');
+    }
+  }
+  if (!url) {
+    throw new Error('No URL found in CURL command');
+  }
+  return { url, method, headers, body };
+}
 // 创建 MCP 服务器
 function createMcpServer() {
   const server = new McpServer({ name: 'HTTP-Request-Server', version: '1.0.0' });
@@ -87,6 +128,41 @@ function createMcpServer() {
       }]
     };
   });
+  // CURL 请求工具
+  server.tool('curl_request', {
+    curl_command: z.string().describe('CURL command string'),
+    timeout: z.number().default(30000)
+  }, async ({ curl_command, timeout }) => {
+    try {
+      const parsed = parseCurlCommand(curl_command);
+      const result = await makeHttpRequest({ 
+        url: parsed.url, 
+        method: parsed.method, 
+        headers: parsed.headers, 
+        body: parsed.body,
+        timeout 
+      });
+      
+      if ('error' in result) {
+        return {
+          content: [{ type: 'text', text: `❌ CURL 请求失败: ${result.message}\n命令: ${curl_command}` }],
+          isError: true
+        };
+      }
+      const icon = result.ok ? '✅' : '❌';
+      return {
+        content: [{
+          type: 'text',
+          text: `${icon} CURL: ${curl_command}\n状态: ${result.status} ${result.statusText}\n\n响应头:\n${Object.entries(result.headers).map(([k,v]) => `${k}: ${v}`).join('\n')}\n\n响应体:\n${typeof result.body === 'object' ? JSON.stringify(result.body, null, 2) : result.body}`
+        }]
+      };
+    } catch (error: any) {
+      return {
+        content: [{ type: 'text', text: `❌ 解析 CURL 命令失败: ${error.message}\n命令: ${curl_command}` }],
+        isError: true
+      };
+    }
+  });
   return server;
 }
 // CORS 头部
@@ -95,6 +171,30 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, mcp-session-id'
 };
+// 创建兼容 Node.js 的 Response 对象
+class MockResponse extends EventEmitter {
+  headersSent = false;
+  statusCode = 200;
+  _headers: Record<string, string> = {};
+  _data: any = undefined;
+  setHeader(name: string, value: string) {
+    this._headers[name] = value;
+  }
+  writeHead(statusCode: number, headers?: Record<string, string>) {
+    this.statusCode = statusCode;
+    if (headers) {
+      Object.assign(this._headers, headers);
+    }
+    return this;
+  }
+  write(chunk: any) {
+    return true;
+  }
+  end(data?: any) {
+    this._data = data;
+    this.emit('finish');
+  }
+}
 const app = new Elysia();
 // OPTIONS 请求处理
 app.options('/mcp', () => {
@@ -112,9 +212,13 @@ app.post('/mcp', async ({ body, headers }) => {
     } else if (!sessionId && isInitializeRequest(body)) {
       transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
-        onsessioninitialized: (id) => { sessions[id] = { transport }; }
+        onsessioninitialized: (id) => { 
+          console.log('Session initialized:', id);
+          sessions[id] = { transport }; 
+        }
       });
       transport.onclose = () => { 
+        console.log('Session closed:', transport.sessionId);
         if (transport.sessionId) delete sessions[transport.sessionId]; 
       };
       
@@ -130,29 +234,39 @@ app.post('/mcp', async ({ body, headers }) => {
         headers: { 'Content-Type': 'application/json', ...corsHeaders } 
       });
     }
-    return new Promise((resolve) => {
-      const req = { method: 'POST', headers, body: JSON.stringify(body), url: '/mcp' };
-      const res = {
-        headersSent: false,
-        statusCode: 200,
-        _headers: {} as Record<string, string>,
-        setHeader: function(k: string, v: string) { this._headers[k] = v; },
-        writeHead: function(status: number) { this.statusCode = status; return this; },
-        write: () => true,
-        end: function(data?: any) {
-          const response = new Response(data || '', {
-            status: this.statusCode,
-            headers: { 
-              'Content-Type': 'application/json',
-              ...corsHeaders,
-              ...this._headers 
-            }
-          });
-          resolve(response);
-        }
+    return new Promise<Response>((resolve) => {
+      const req = { 
+        method: 'POST', 
+        headers, 
+        body: JSON.stringify(body), 
+        url: '/mcp' 
       };
       
-      transport.handleRequest(req as any, res as any, body);
+      const res = new MockResponse();
+      
+      res.on('finish', () => {
+        const response = new Response(res._data || '', {
+          status: res.statusCode,
+          headers: { 
+            'Content-Type': 'application/json',
+            ...corsHeaders,
+            ...res._headers 
+          }
+        });
+        resolve(response);
+      });
+      
+      transport.handleRequest(req as any, res as any, body).catch((error) => {
+        console.error('Transport error:', error);
+        resolve(new Response(JSON.stringify({
+          jsonrpc: '2.0',
+          error: { code: -32603, message: 'Internal Error' },
+          id: null
+        }), { 
+          status: 500, 
+          headers: { 'Content-Type': 'application/json', ...corsHeaders } 
+        }));
+      });
     });
   } catch (error) {
     console.error('Error:', error);
@@ -179,24 +293,24 @@ app.get('/mcp', async ({ headers }) => {
   
   const transport = sessions[sessionId].transport;
   
-  return new Promise((resolve) => {
+  return new Promise<Response>((resolve) => {
     const req = { method: 'GET', headers, url: '/mcp' };
-    const res = {
-      headersSent: false,
-      statusCode: 200,
-      _headers: {} as Record<string, string>,
-      setHeader: function(k: string, v: string) { this._headers[k] = v; },
-      writeHead: function(status: number) { this.statusCode = status; return this; },
-      write: () => true,
-      end: function(data?: any) {
-        resolve(new Response(data || '', {
-          status: this.statusCode,
-          headers: { ...corsHeaders, ...this._headers }
-        }));
-      }
-    };
+    const res = new MockResponse();
     
-    transport.handleRequest(req as any, res as any);
+    res.on('finish', () => {
+      resolve(new Response(res._data || '', {
+        status: res.statusCode,
+        headers: { ...corsHeaders, ...res._headers }
+      }));
+    });
+    
+    transport.handleRequest(req as any, res as any).catch((error) => {
+      console.error('Transport error:', error);
+      resolve(new Response('Internal Error', { 
+        status: 500, 
+        headers: corsHeaders 
+      }));
+    });
   });
 });
 // DELETE 请求处理
@@ -213,7 +327,8 @@ app.delete('/mcp', async ({ headers }) => {
 app.get('/health', () => {
   return new Response(JSON.stringify({ 
     status: 'ok', 
-    sessions: Object.keys(sessions).length 
+    sessions: Object.keys(sessions).length,
+    activeSessions: Object.keys(sessions)
   }), {
     headers: { 'Content-Type': 'application/json', ...corsHeaders }
   });
