@@ -89,28 +89,19 @@ function createMcpServer() {
   });
   return server;
 }
+// CORS 头部
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, mcp-session-id'
+};
 const app = new Elysia();
-// CORS 中间件
-app.use(async (context) => {
-  context.set.headers = context.set.headers || {};
-  context.set.headers['Access-Control-Allow-Origin'] = '*';
-  context.set.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS';
-  context.set.headers['Access-Control-Allow-Headers'] = 'Content-Type, mcp-session-id';
-});
 // OPTIONS 请求处理
-app.options('/mcp', (context) => {
-  return new Response('', { 
-    status: 200,
-    headers: {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, mcp-session-id'
-    }
-  });
+app.options('/mcp', () => {
+  return new Response('', { status: 200, headers: corsHeaders });
 });
 // POST 请求处理
-app.post('/mcp', async (context) => {
-  const { body, headers } = context;
+app.post('/mcp', async ({ body, headers }) => {
   console.log('POST /mcp', headers['mcp-session-id']);
   
   const sessionId = headers['mcp-session-id'] as string;
@@ -136,7 +127,7 @@ app.post('/mcp', async (context) => {
         id: null
       }), { 
         status: 400, 
-        headers: { 'Content-Type': 'application/json' } 
+        headers: { 'Content-Type': 'application/json', ...corsHeaders } 
       });
     }
     return new Promise((resolve) => {
@@ -153,7 +144,7 @@ app.post('/mcp', async (context) => {
             status: this.statusCode,
             headers: { 
               'Content-Type': 'application/json',
-              'Access-Control-Allow-Origin': '*',
+              ...corsHeaders,
               ...this._headers 
             }
           });
@@ -171,17 +162,19 @@ app.post('/mcp', async (context) => {
       id: null
     }), { 
       status: 500, 
-      headers: { 'Content-Type': 'application/json' } 
+      headers: { 'Content-Type': 'application/json', ...corsHeaders } 
     });
   }
 });
 // GET 请求处理
-app.get('/mcp', async (context) => {
-  const { headers } = context;
+app.get('/mcp', async ({ headers }) => {
   const sessionId = headers['mcp-session-id'] as string;
   
   if (!sessionId || !sessions[sessionId]) {
-    return new Response('Invalid session', { status: 400 });
+    return new Response('Invalid session', { 
+      status: 400, 
+      headers: corsHeaders 
+    });
   }
   
   const transport = sessions[sessionId].transport;
@@ -198,7 +191,7 @@ app.get('/mcp', async (context) => {
       end: function(data?: any) {
         resolve(new Response(data || '', {
           status: this.statusCode,
-          headers: { ...this._headers }
+          headers: { ...corsHeaders, ...this._headers }
         }));
       }
     };
@@ -207,19 +200,23 @@ app.get('/mcp', async (context) => {
   });
 });
 // DELETE 请求处理
-app.delete('/mcp', async (context) => {
-  const { headers } = context;
+app.delete('/mcp', async ({ headers }) => {
   const sessionId = headers['mcp-session-id'] as string;
   
   if (sessionId && sessions[sessionId]) {
     delete sessions[sessionId];
   }
   
-  return new Response('', { status: 200 });
+  return new Response('', { status: 200, headers: corsHeaders });
 });
 // 健康检查
 app.get('/health', () => {
-  return { status: 'ok', sessions: Object.keys(sessions).length };
+  return new Response(JSON.stringify({ 
+    status: 'ok', 
+    sessions: Object.keys(sessions).length 
+  }), {
+    headers: { 'Content-Type': 'application/json', ...corsHeaders }
+  });
 });
 // 启动服务器
 app.listen(3000, () => {
