@@ -270,24 +270,21 @@ function parseCurlCommand(curlCommand: string) {
   }
   return { url, method, headers, body };
 }
-// Add proper CORS and content-type handling
-app.use((context) => {
-  // Set CORS headers
-  context.set.headers['Access-Control-Allow-Origin'] = '*';
-  context.set.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS';
-  context.set.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, mcp-session-id';
+// Add CORS middleware properly
+app.use(async ({ set }) => {
+  set.headers['Access-Control-Allow-Origin'] = '*';
+  set.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS';
+  set.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, mcp-session-id';
 });
 // Handle OPTIONS requests for CORS
 app.options('/mcp', ({ set }) => {
   set.headers['Access-Control-Allow-Origin'] = '*';
   set.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS';
   set.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, mcp-session-id';
-  return '';
+  return new Response('', { status: 200 });
 });
 // Handle MCP requests with session management
-app.post('/mcp', async (context) => {
-  const { body, headers, set } = context;
-  
+app.post('/mcp', async ({ body, headers, set }) => {
   console.log('Received POST message for sessionId', headers['mcp-session-id']);
   
   const sessionId = headers['mcp-session-id'] as string | undefined;
@@ -336,19 +333,21 @@ app.post('/mcp', async (context) => {
       body: JSON.stringify(body),
       url: '/mcp'
     };
+    let responseData: any = undefined;
+    let responseStatus = 200;
+    let responseHeaders: Record<string, string> = {};
     const res = {
       headersSent: false,
       statusCode: 200,
-      _headers: {} as Record<string, string>,
       
       setHeader(name: string, value: string) {
-        this._headers[name] = value;
+        responseHeaders[name] = value;
       },
       
       writeHead(statusCode: number, headers?: Record<string, string>) {
-        this.statusCode = statusCode;
+        responseStatus = statusCode;
         if (headers) {
-          Object.assign(this._headers, headers);
+          Object.assign(responseHeaders, headers);
         }
         return this;
       },
@@ -358,41 +357,26 @@ app.post('/mcp', async (context) => {
       },
       
       end(data?: any) {
-        // Set response headers and status
-        set.status = this.statusCode;
-        Object.entries(this._headers).forEach(([key, value]) => {
+        responseData = data;
+        set.status = responseStatus;
+        Object.entries(responseHeaders).forEach(([key, value]) => {
           set.headers[key] = value;
         });
-        
-        if (data) {
-          try {
-            return JSON.parse(data);
-          } catch {
-            return data;
-          }
-        }
-        return undefined;
       }
     };
     // Handle the request
-    return new Promise((resolve, reject) => {
-      transport.handleRequest(req as any, res as any, body)
-        .then(() => {
-          // The response should be handled by the res.end() method
-          resolve(undefined);
-        })
-        .catch((error) => {
-          console.error('Error handling MCP request:', error);
-          reject(error);
-        });
-      // Set up the end method to resolve the promise
-      const originalEnd = res.end.bind(res);
-      res.end = (data?: any) => {
-        const result = originalEnd(data);
-        resolve(result);
-        return res as any;
-      };
-    });
+    await transport.handleRequest(req as any, res as any, body);
+    
+    // Return the response data
+    if (responseData) {
+      try {
+        return JSON.parse(responseData);
+      } catch {
+        return responseData;
+      }
+    }
+    
+    return undefined;
   } catch (error) {
     console.error('Error in POST /mcp:', error);
     set.status = 500;
@@ -407,9 +391,7 @@ app.post('/mcp', async (context) => {
   }
 });
 // Handle GET requests for server-to-client notifications
-app.get('/mcp', async (context) => {
-  const { headers, set } = context;
-  
+app.get('/mcp', async ({ headers, set }) => {
   console.log('Received GET request for sessionId', headers['mcp-session-id']);
   
   const sessionId = headers['mcp-session-id'] as string | undefined;
@@ -425,19 +407,21 @@ app.get('/mcp', async (context) => {
     headers: headers as Record<string, string>,
     url: '/mcp'
   };
+  let responseData: any = undefined;
+  let responseStatus = 200;
+  let responseHeaders: Record<string, string> = {};
   const res = {
     headersSent: false,
     statusCode: 200,
-    _headers: {} as Record<string, string>,
     
     setHeader(name: string, value: string) {
-      this._headers[name] = value;
+      responseHeaders[name] = value;
     },
     
     writeHead(statusCode: number, headers?: Record<string, string>) {
-      this.statusCode = statusCode;
+      responseStatus = statusCode;
       if (headers) {
-        Object.assign(this._headers, headers);
+        Object.assign(responseHeaders, headers);
       }
       return this;
     },
@@ -447,29 +431,27 @@ app.get('/mcp', async (context) => {
     },
     
     end(data?: any) {
-      set.status = this.statusCode;
-      Object.entries(this._headers).forEach(([key, value]) => {
+      responseData = data;
+      set.status = responseStatus;
+      Object.entries(responseHeaders).forEach(([key, value]) => {
         set.headers[key] = value;
       });
-      return data;
     }
   };
-  return new Promise((resolve, reject) => {
-    transport.handleRequest(req as any, res as any)
-      .then(() => resolve(undefined))
-      .catch(reject);
-    const originalEnd = res.end.bind(res);
-    res.end = (data?: any) => {
-      const result = originalEnd(data);
-      resolve(result);
-      return res as any;
-    };
-  });
+  await transport.handleRequest(req as any, res as any);
+  
+  if (responseData) {
+    try {
+      return JSON.parse(responseData);
+    } catch {
+      return responseData;
+    }
+  }
+  
+  return undefined;
 });
 // Handle DELETE requests for session termination
-app.delete('/mcp', async (context) => {
-  const { headers, set } = context;
-  
+app.delete('/mcp', async ({ headers, set }) => {
   console.log('Received DELETE request for sessionId', headers['mcp-session-id']);
   
   const sessionId = headers['mcp-session-id'] as string | undefined;
@@ -480,24 +462,29 @@ app.delete('/mcp', async (context) => {
   
   const transport = sessions[sessionId].transport;
   
+  // Clean up the session
+  delete sessions[sessionId];
+  
   const req = {
     method: 'DELETE',
     headers: headers as Record<string, string>,
     url: '/mcp'
   };
+  let responseData: any = undefined;
+  let responseStatus = 200;
+  let responseHeaders: Record<string, string> = {};
   const res = {
     headersSent: false,
     statusCode: 200,
-    _headers: {} as Record<string, string>,
     
     setHeader(name: string, value: string) {
-      this._headers[name] = value;
+      responseHeaders[name] = value;
     },
     
     writeHead(statusCode: number, headers?: Record<string, string>) {
-      this.statusCode = statusCode;
+      responseStatus = statusCode;
       if (headers) {
-        Object.assign(this._headers, headers);
+        Object.assign(responseHeaders, headers);
       }
       return this;
     },
@@ -507,24 +494,24 @@ app.delete('/mcp', async (context) => {
     },
     
     end(data?: any) {
-      set.status = this.statusCode;
-      Object.entries(this._headers).forEach(([key, value]) => {
+      responseData = data;
+      set.status = responseStatus;
+      Object.entries(responseHeaders).forEach(([key, value]) => {
         set.headers[key] = value;
       });
-      return data;
     }
   };
-  return new Promise((resolve, reject) => {
-    transport.handleRequest(req as any, res as any)
-      .then(() => resolve(undefined))
-      .catch(reject);
-    const originalEnd = res.end.bind(res);
-    res.end = (data?: any) => {
-      const result = originalEnd(data);
-      resolve(result);
-      return res as any;
-    };
-  });
+  await transport.handleRequest(req as any, res as any);
+  
+  if (responseData) {
+    try {
+      return JSON.parse(responseData);
+    } catch {
+      return responseData;
+    }
+  }
+  
+  return undefined;
 });
 // Health check endpoint
 app.get('/health', () => ({
