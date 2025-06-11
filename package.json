@@ -1,0 +1,28 @@
+{
+  "name": "http-mcp-server",
+  "version": "1.0.0",
+  "description": "Universal HTTP request MCP server built with Elysia and Bun",
+  "main": "index.ts",
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot index.ts",
+    "start": "bun index.ts",
+    "build": "bun build index.ts --outdir=dist",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "elysia": "latest",
+    "@modelcontextprotocol/sdk": "1.11.4",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "bun-types": "latest"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "keywords": ["mcp", "http", "api", "elysia", "bun"],
+  "author": "Your Name",
+  "license": "MIT"
+}
